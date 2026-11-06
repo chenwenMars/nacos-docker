@@ -11,11 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-set -x
+set -e
 export CUSTOM_SEARCH_NAMES="application"
 export CUSTOM_SEARCH_LOCATIONS=file:${BASE_DIR}/conf/
 export MEMBER_LIST="$MEMBER_LIST"
 PLUGINS_DIR="/home/nacos/plugins/peer-finder"
+DEFAULT_LOADER_PATH="${BASE_DIR}/plugins,${BASE_DIR}/plugins/health,${BASE_DIR}/plugins/cmdb,${BASE_DIR}/plugins/selector"
+
+# Keep bundled archives outside the data volume so an empty bind mount can be initialized.
+# Existing archives and plugin state belong to the volume and must survive container replacement.
+mkdir -p "${BASE_DIR}/logs" "${BASE_DIR}/data"
+for archive in skills-data.zip agentspec-data.zip; do
+  if [[ -f "${BASE_DIR}/data-seed/${archive}" && ! -e "${BASE_DIR}/data/${archive}" ]]; then
+    cp "${BASE_DIR}/data-seed/${archive}" "${BASE_DIR}/data/${archive}"
+  fi
+done
 function print_servers() {
    if [[ ! -d "${PLUGINS_DIR}" ]]; then
     echo "" >"$CLUSTER_CONF"
@@ -54,7 +64,7 @@ else
   fi
   JAVA_OPT="${JAVA_OPT} -server $Xms $Xmx $Xmn $XX_MS $XX_MMS"
   if [[ "${NACOS_DEBUG}" == "y" ]]; then
-    JAVA_OPT="${JAVA_OPT} -Xdebug -Xrunjdwp:transport=dt_socket,address=9555,server=y,suspend=n"
+    JAVA_OPT="${JAVA_OPT} -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:9555"
   fi
   JAVA_OPT="${JAVA_OPT} -XX:-OmitStackTraceInFastThrow -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${BASE_DIR}/logs/java_heapdump.hprof"
   JAVA_OPT="${JAVA_OPT} -XX:-UseLargePages"
@@ -69,6 +79,10 @@ if [[ "${FUNCTION_MODE}" == "config" ]]; then
   JAVA_OPT="${JAVA_OPT} -Dnacos.functionMode=config"
 elif [[ "${FUNCTION_MODE}" == "naming" ]]; then
   JAVA_OPT="${JAVA_OPT} -Dnacos.functionMode=naming"
+elif [[ "${FUNCTION_MODE}" == "microservice" ]]; then
+  JAVA_OPT="${JAVA_OPT} -Dnacos.functionMode=microservice"
+elif [[ "${FUNCTION_MODE}" == "ai" ]]; then
+  JAVA_OPT="${JAVA_OPT} -Dnacos.functionMode=ai"
 fi
 # set nacos server ip
 if [[ ! -z "${NACOS_SERVER_IP}" ]]; then
@@ -127,13 +141,21 @@ fi
 JAVA_MAJOR_VERSION=$($JAVA -version 2>&1 | sed -E -n 's/.* version "([0-9]*).*$/\1/p')
 if [[ "$JAVA_MAJOR_VERSION" -ge "9" ]]; then
   JAVA_OPT="${JAVA_OPT} -Xlog:gc*:file=${BASE_DIR}/logs/nacos_gc.log:time,tags:filecount=10,filesize=102400"
+  JAVA_OPT="${JAVA_OPT} --add-opens=java.base/java.lang=ALL-UNNAMED"
+  JAVA_OPT="${JAVA_OPT} --add-opens=java.base/java.lang.reflect=ALL-UNNAMED"
+  JAVA_OPT="${JAVA_OPT} --add-opens=java.base/java.util=ALL-UNNAMED"
 else
   JAVA_OPT="${JAVA_OPT} -XX:+UseConcMarkSweepGC -XX:+UseCMSCompactAtFullCollection -XX:CMSInitiatingOccupancyFraction=70 -XX:+CMSParallelRemarkEnabled -XX:SoftRefLRUPolicyMSPerMB=0 -XX:+CMSClassUnloadingEnabled -XX:SurvivorRatio=8 "
   JAVA_OPT_EXT_FIX="-Djava.ext.dirs=${JAVA_HOME}/jre/lib/ext:${JAVA_HOME}/lib/ext"
   JAVA_OPT="${JAVA_OPT} -Xloggc:${BASE_DIR}/logs/nacos_gc.log -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+PrintGCTimeStamps -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=10 -XX:GCLogFileSize=100M"
 fi
 
-JAVA_OPT="${JAVA_OPT} -Dloader.path=${BASE_DIR}/plugins,${BASE_DIR}/plugins/health,${BASE_DIR}/plugins/cmdb,${BASE_DIR}/plugins/selector"
+LOADER_PATH="${DEFAULT_LOADER_PATH}"
+if [[ -n "${NACOS_EXT_PLUGIN_DIRS}" ]]; then
+  LOADER_PATH="${LOADER_PATH},${NACOS_EXT_PLUGIN_DIRS}"
+fi
+
+JAVA_OPT="${JAVA_OPT} -Dloader.path=${LOADER_PATH}"
 JAVA_OPT="${JAVA_OPT} -Dnacos.home=${BASE_DIR}"
 JAVA_OPT="${JAVA_OPT} -jar ${BASE_DIR}/target/nacos-server.jar"
 JAVA_OPT="${JAVA_OPT} ${JAVA_OPT_EXT}"
